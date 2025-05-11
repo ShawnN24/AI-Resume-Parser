@@ -1,26 +1,31 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import Depends, FastAPI, File, UploadFile, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
 import fitz  # PyMuPDF
 import re
-import uvicorn
 import json
 import httpx
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 
 app = FastAPI()
 
-# Allow CORS for testing with your PortFlow frontend
+# Allow CORS for testing with frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change this in production!
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def verify_api_key(x_api_key: str = Header(...)):
+    PROJECT_KEY = os.getenv("PROJECT_KEY")
+    if x_api_key != PROJECT_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
 def load_skill_variants(file_path="skills.txt") -> dict:
     """
@@ -78,42 +83,55 @@ def parse_resume(text: str) -> Dict:
     }
 
 @app.post("/parse")
-async def parse_resume_endpoint(file: UploadFile = File(...)):
+async def parse_resume_endpoint(file: UploadFile = File(...), _: str = Depends(verify_api_key)):
     contents = await file.read()
     text = extract_text_from_pdf(contents)
     parsed = parse_resume(text)
     return parsed
 
-@app.post("/extract-experience/")
-async def extract_experience(file: UploadFile = File(...)):
+@app.post("/extract-experience")
+async def extract_experience(file: UploadFile = File(...), _: str = Depends(verify_api_key)):
     contents = await file.read()
     text = extract_text_from_pdf(contents)
     API_KEY = os.getenv("API_KEY")
-    response = httpx.post(
-        url="https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-        },
-        data=json.dumps({
-            "model": "mistralai/mistral-small-3.1-24b-instruct:free",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an AI resume parser that extracts and summarizes professional experience into structured JSON format. Only extract relevant experience such as job titles, companies, durations, and concise bullet points of responsibilities or achievements.\n\nOutput the result in the following JSON format:\n\n{\n\"experiences\": [\n    {\n    \"job_title\": \"\",\n    \"company\": \"\",\n    \"location\": \"\",\n    \"start_date\": \"\",\n    \"end_date\": \"\",\n    \"bullets\": [\"\", \"\", ...]\n    }\n]\n}"
-                },
-                {
-                    "role": "user",
-                    "content": f"Extract the experience section from this resume and format it into JSON as instructed:\n{text}"
-                }
-            ],
-        })
-    )
-    raw_output = response.json()["choices"][0]["message"]["content"]
-    cleaned = raw_output.strip("```json\n").strip("```")
-    parsed = json.loads(cleaned)
-    return parsed
+    try:
+        response = httpx.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps({
+                "model": "mistralai/mistral-small-3.1-24b-instruct:free",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an AI resume parser that extracts and summarizes professional experience into structured JSON format. Only extract relevant experience such as job titles, companies, durations, and concise bullet points of responsibilities or achievements.\n\nOutput the result in the following JSON format:\n\n{\n\"experiences\": [\n    {\n    \"job_title\": \"\",\n    \"company\": \"\",\n    \"location\": \"\",\n    \"start_date\": \"\",\n    \"end_date\": \"\",\n    \"bullets\": [\"\", \"\", ...]\n    }\n]\n}"
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Extract the experience section from this resume and format it into JSON as instructed:\n{text}"
+                    }
+                ],
+            }),
+            timeout=15.0
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logging.error(f"HTTP error: {exc.response.status_code} - {exc.response.text}")
+        raise HTTPException(status_code=exc.response.status_code, detail="External API error")
+    except httpx.RequestError as exc:
+        logging.error(f"Request error: {str(exc)}")
+        raise HTTPException(status_code=503, detail="Unable to reach the language model API")
 
-# Use to test locally
-# if __name__ == "__main__":
-#     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    try:
+        raw_output = response.json()["choices"][0]["message"]["content"]
+        cleaned = raw_output.strip("```json\n").strip("```")
+        parsed = json.loads(cleaned)
+    except (KeyError, json.JSONDecodeError) as e:
+        logging.warning(f"Failed to parse model output: {e}")
+        return {
+            "experiences": [],
+            "warning": "Failed to parse structured data from the model output. Please try again later or with a different resume."
+        }
+    return parsed
