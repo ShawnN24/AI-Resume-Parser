@@ -1,6 +1,6 @@
 # 🧠 AI Resume Parser
 
-AI Resume Parser is a FastAPI-based backend service that extracts structured work experience from resumes using advanced natural language processing. Built to serve as a microservice for the [PortFlow](https://github.com/YOUR_USERNAME/PortFlow) app, it converts uploaded resumes into a JSON format that can be consumed by frontends or other services.
+AI Resume Parser is a FastAPI-based backend service that extracts structured work experience from resumes using advanced natural language processing. Built to serve as a microservice for the [PortFlow](https://github.com/ShawnN24/PortFlow) app, it converts uploaded resumes into a JSON format that can be consumed by frontends or other services.
 
 ---
 
